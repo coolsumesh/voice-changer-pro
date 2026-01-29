@@ -102,11 +102,12 @@ class AudioProcessor:
         # Convert audio to WAV bytes
         wav_bytes = self.audio_to_wav_bytes(audio)
         
-        # ElevenLabs Speech-to-Speech endpoint
+        # ElevenLabs Speech-to-Speech endpoint with PCM output (no FFmpeg needed!)
         url = f"https://api.elevenlabs.io/v1/speech-to-speech/{voice_id}"
         
         headers = {
             "xi-api-key": ELEVENLABS_API_KEY,
+            "Accept": "audio/mpeg",  # Request format
         }
         
         # Send as multipart form data
@@ -116,47 +117,31 @@ class AudioProcessor:
         
         data = {
             "model_id": self.selected_model,
-            "voice_settings": '{"stability": 0.5, "similarity_boost": 0.75}'
+            "voice_settings": '{"stability": 0.5, "similarity_boost": 0.75}',
+            "output_format": "pcm_44100"  # PCM format - no FFmpeg needed!
         }
         
         response = requests.post(url, headers=headers, files=files, data=data)
         
         if response.status_code == 200:
-            # Convert MP3 response to numpy array
+            # PCM format is raw 16-bit signed integers
             audio_bytes = response.content
             
-            # Save to temp file and read back
-            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
-                f.write(audio_bytes)
-                temp_path = f.name
+            # Convert PCM bytes to numpy array
+            audio_data = np.frombuffer(audio_bytes, dtype=np.int16)
             
-            # Use scipy to read (might need to convert MP3 first)
-            try:
-                # Try reading as WAV first
-                sr, audio_data = wavfile.read(temp_path)
-                os.unlink(temp_path)
-                return audio_data.astype(np.float32) / 32767
-            except:
-                # If it's MP3, we need pydub or similar
-                try:
-                    from pydub import AudioSegment
-                    audio_seg = AudioSegment.from_mp3(temp_path)
-                    os.unlink(temp_path)
-                    
-                    # Convert to numpy
-                    samples = np.array(audio_seg.get_array_of_samples())
-                    if audio_seg.channels == 2:
-                        samples = samples.reshape((-1, 2)).mean(axis=1)
-                    
-                    self.converted_sample_rate = audio_seg.frame_rate
-                    return samples.astype(np.float32) / 32767
-                except ImportError:
-                    # Fallback: save as raw and let sounddevice handle it
-                    os.unlink(temp_path)
-                    raise Exception("Install pydub: pip install pydub")
+            # Convert to float32 [-1, 1]
+            audio_float = audio_data.astype(np.float32) / 32767
+            
+            self.converted_sample_rate = 44100
+            return audio_float
         else:
-            error_msg = response.json().get('detail', {}).get('message', response.text)
-            raise Exception(f"ElevenLabs API error: {error_msg}")
+            try:
+                error_data = response.json()
+                error_msg = error_data.get('detail', {}).get('message', str(error_data))
+            except:
+                error_msg = response.text
+            raise Exception(f"API error: {error_msg}")
     
     def play_audio(self, audio: np.ndarray, sample_rate: int = None):
         """Play audio through speakers"""
