@@ -34,6 +34,12 @@ VOICES = {
     "Sam (Male)": "yoZ06aMxZJJ28mfd3POQ",
 }
 
+# Model options
+MODELS = {
+    "English Only": "eleven_english_sts_v2",
+    "Multilingual": "eleven_multilingual_sts_v2",
+}
+
 
 class AudioProcessor:
     """Handles audio recording and ElevenLabs conversion"""
@@ -44,6 +50,7 @@ class AudioProcessor:
         self.recorded_audio = []
         self.converted_audio = None
         self.selected_voice_id = list(VOICES.values())[0]
+        self.selected_model = "eleven_multilingual_sts_v2"  # Default to multilingual
         
     def start_recording(self):
         """Start recording audio"""
@@ -108,7 +115,7 @@ class AudioProcessor:
         }
         
         data = {
-            "model_id": "eleven_english_sts_v2",
+            "model_id": self.selected_model,
             "voice_settings": '{"stability": 0.5, "similarity_boost": 0.75}'
         }
         
@@ -269,6 +276,37 @@ class VoiceChangerApp(ctk.CTk):
         )
         male_label.pack(pady=(0,10))
         
+        # Language/Model selector
+        lang_frame = ctk.CTkFrame(self.main_frame)
+        lang_frame.pack(pady=10, padx=10, fill="x")
+        
+        lang_label = ctk.CTkLabel(
+            lang_frame,
+            text="Language Mode:",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        lang_label.pack(pady=10)
+        
+        self.model_var = ctk.StringVar(value="Multilingual")
+        
+        self.model_dropdown = ctk.CTkComboBox(
+            lang_frame,
+            values=list(MODELS.keys()),
+            variable=self.model_var,
+            command=self.on_model_change,
+            width=300,
+            font=ctk.CTkFont(size=14)
+        )
+        self.model_dropdown.pack(pady=5)
+        
+        lang_info = ctk.CTkLabel(
+            lang_frame,
+            text="🌍 Multilingual: Supports 29 languages\n🇺🇸 English Only: Best for English speech",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        lang_info.pack(pady=(5,10))
+        
         # Control buttons
         btn_frame = ctk.CTkFrame(self.main_frame)
         btn_frame.pack(pady=15, padx=10, fill="x")
@@ -355,6 +393,10 @@ class VoiceChangerApp(ctk.CTk):
     def on_voice_change(self, choice):
         """Handle voice selection change"""
         self.audio.selected_voice_id = VOICES[choice]
+        
+    def on_model_change(self, choice):
+        """Handle model/language selection change"""
+        self.audio.selected_model = MODELS[choice]
         
     def toggle_recording(self):
         """Start or stop recording"""
