@@ -133,7 +133,7 @@ class VoiceChangerApp(ctk.CTk):
         
         # Window setup
         self.title("Voice Changer Pro 🎤")
-        self.geometry("400x500")
+        self.geometry("400x600")
         self.resizable(False, False)
         
         # Audio processor
