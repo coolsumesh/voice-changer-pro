@@ -1,36 +1,49 @@
 #!/usr/bin/env python3
 """
-Voice Changer Pro - Record & Convert voice transformation
+Voice Changer Pro - ElevenLabs AI Voice Conversion
 """
 
 import customtkinter as ctk
 import sounddevice as sd
 import numpy as np
 import threading
-import wave
+import requests
+import io
 import os
+import wave
 import tempfile
 from datetime import datetime
 from scipy.io import wavfile
-from scipy import signal
 
 # Configure UI theme
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
+# ElevenLabs API Configuration
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "sk_8269ab1484ed4e63425bc3490025eff813ddbbde40664c19")
+
+# ElevenLabs Voice IDs (popular voices)
+VOICES = {
+    "Rachel (Female)": "21m00Tcm4TlvDq8ikWAM",
+    "Domi (Female)": "AZnzlk1XvdvUeBnXmlld",
+    "Bella (Female)": "EXAVITQu4vr4xnSDxMaL",
+    "Antoni (Male)": "ErXwobaYiN019PkySvjV",
+    "Josh (Male)": "TxGEqnHWrfWFTfGW9XjX",
+    "Arnold (Male)": "VR6AewLTigWG4xSOukaG",
+    "Adam (Male)": "pNInz6obpgDQGcFmaJgB",
+    "Sam (Male)": "yoZ06aMxZJJ28mfd3POQ",
+}
+
 
 class AudioProcessor:
-    """Handles audio recording and processing"""
+    """Handles audio recording and ElevenLabs conversion"""
     
     def __init__(self, sample_rate: int = 44100):
         self.sample_rate = sample_rate
         self.is_recording = False
         self.recorded_audio = []
         self.converted_audio = None
-        
-        # Voice settings
-        self.voice_type = "female"
-        self.pitch_shift = 0
+        self.selected_voice_id = list(VOICES.values())[0]
         
     def start_recording(self):
         """Start recording audio"""
@@ -60,121 +73,95 @@ class AudioProcessor:
             return np.concatenate(self.recorded_audio, axis=0)
         return None
     
-    def pitch_shift_audio(self, audio: np.ndarray, semitones: float) -> np.ndarray:
-        """Pitch shift using resampling with formant preservation attempt"""
-        if semitones == 0:
-            return audio
+    def audio_to_wav_bytes(self, audio: np.ndarray) -> bytes:
+        """Convert numpy audio to WAV bytes"""
+        # Convert to 16-bit PCM
+        audio_16bit = (audio.flatten() * 32767).astype(np.int16)
         
-        ratio = 2 ** (semitones / 12)
+        # Create WAV in memory
+        buffer = io.BytesIO()
+        with wave.open(buffer, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)  # 16-bit
+            wav_file.setframerate(self.sample_rate)
+            wav_file.writeframes(audio_16bit.tobytes())
         
-        # Resample
-        n_samples = int(len(audio) / ratio)
-        if n_samples == 0:
-            return audio
-            
-        shifted = signal.resample(audio, n_samples)
-        
-        # Time-stretch back to original length (preserves duration)
-        stretched = signal.resample(shifted, len(audio))
-        
-        return stretched.astype(np.float32)
+        buffer.seek(0)
+        return buffer.read()
     
-    def apply_formant_shift(self, audio: np.ndarray, shift_factor: float) -> np.ndarray:
-        """Apply formant shifting for more natural voice conversion"""
-        # Simple formant shift using spectral envelope manipulation
-        from scipy.fft import fft, ifft
+    def convert_with_elevenlabs(self, audio: np.ndarray, voice_id: str) -> np.ndarray:
+        """Convert voice using ElevenLabs Speech-to-Speech API"""
         
-        # Window the audio
-        window_size = 2048
-        hop_size = 512
+        # Convert audio to WAV bytes
+        wav_bytes = self.audio_to_wav_bytes(audio)
         
-        # Pad audio
-        pad_length = window_size - (len(audio) % window_size)
-        audio_padded = np.pad(audio.flatten(), (0, pad_length))
+        # ElevenLabs Speech-to-Speech endpoint
+        url = f"https://api.elevenlabs.io/v1/speech-to-speech/{voice_id}"
         
-        output = np.zeros_like(audio_padded)
-        window = np.hanning(window_size)
+        headers = {
+            "xi-api-key": ELEVENLABS_API_KEY,
+        }
         
-        for i in range(0, len(audio_padded) - window_size, hop_size):
-            frame = audio_padded[i:i+window_size] * window
-            
-            # FFT
-            spectrum = fft(frame)
-            magnitude = np.abs(spectrum)
-            phase = np.angle(spectrum)
-            
-            # Shift formants by interpolating magnitude spectrum
-            freqs = np.arange(len(magnitude))
-            new_freqs = freqs / shift_factor
-            new_freqs = np.clip(new_freqs, 0, len(magnitude) - 1)
-            
-            shifted_magnitude = np.interp(freqs, new_freqs, magnitude)
-            
-            # Reconstruct
-            shifted_spectrum = shifted_magnitude * np.exp(1j * phase)
-            frame_out = np.real(ifft(shifted_spectrum)) * window
-            
-            output[i:i+window_size] += frame_out
+        # Send as multipart form data
+        files = {
+            "audio": ("recording.wav", wav_bytes, "audio/wav"),
+        }
         
-        # Normalize
-        output = output[:len(audio)]
-        max_val = np.max(np.abs(output))
-        if max_val > 0:
-            output = output / max_val * 0.9
-            
-        return output.astype(np.float32)
-    
-    def convert_voice(self, audio: np.ndarray) -> np.ndarray:
-        """Convert voice based on selected type"""
-        audio = audio.flatten()
+        data = {
+            "model_id": "eleven_english_sts_v2",
+            "voice_settings": '{"stability": 0.5, "similarity_boost": 0.75}'
+        }
         
-        if self.voice_type == "female":
-            # Higher pitch + formant shift for female
-            converted = self.pitch_shift_audio(audio, 4 + self.pitch_shift)
-            converted = self.apply_formant_shift(converted, 1.2)
+        response = requests.post(url, headers=headers, files=files, data=data)
+        
+        if response.status_code == 200:
+            # Convert MP3 response to numpy array
+            audio_bytes = response.content
             
-        elif self.voice_type == "male":
-            # Lower pitch + formant shift for male
-            converted = self.pitch_shift_audio(audio, -4 + self.pitch_shift)
-            converted = self.apply_formant_shift(converted, 0.85)
+            # Save to temp file and read back
+            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
+                f.write(audio_bytes)
+                temp_path = f.name
             
-        elif self.voice_type == "robot":
-            # Ring modulation for robot
-            t = np.arange(len(audio)) / self.sample_rate
-            modulator = np.sin(2 * np.pi * 50 * t)
-            converted = (audio * modulator * 0.7 + audio * 0.3).astype(np.float32)
-            
-        elif self.voice_type == "whisper":
-            # Add noise and reduce harmonics
-            noise = np.random.randn(len(audio)) * 0.1
-            converted = (audio * 0.3 + noise * np.abs(audio) * 2).astype(np.float32)
-            
-        elif self.voice_type == "deep":
-            # Very low pitch
-            converted = self.pitch_shift_audio(audio, -8 + self.pitch_shift)
-            converted = self.apply_formant_shift(converted, 0.75)
-            
-        elif self.voice_type == "chipmunk":
-            # Very high pitch
-            converted = self.pitch_shift_audio(audio, 10 + self.pitch_shift)
-            converted = self.apply_formant_shift(converted, 1.4)
-            
+            # Use scipy to read (might need to convert MP3 first)
+            try:
+                # Try reading as WAV first
+                sr, audio_data = wavfile.read(temp_path)
+                os.unlink(temp_path)
+                return audio_data.astype(np.float32) / 32767
+            except:
+                # If it's MP3, we need pydub or similar
+                try:
+                    from pydub import AudioSegment
+                    audio_seg = AudioSegment.from_mp3(temp_path)
+                    os.unlink(temp_path)
+                    
+                    # Convert to numpy
+                    samples = np.array(audio_seg.get_array_of_samples())
+                    if audio_seg.channels == 2:
+                        samples = samples.reshape((-1, 2)).mean(axis=1)
+                    
+                    self.converted_sample_rate = audio_seg.frame_rate
+                    return samples.astype(np.float32) / 32767
+                except ImportError:
+                    # Fallback: save as raw and let sounddevice handle it
+                    os.unlink(temp_path)
+                    raise Exception("Install pydub: pip install pydub")
         else:
-            converted = self.pitch_shift_audio(audio, self.pitch_shift)
-        
-        self.converted_audio = converted
-        return converted
+            error_msg = response.json().get('detail', {}).get('message', response.text)
+            raise Exception(f"ElevenLabs API error: {error_msg}")
     
-    def play_audio(self, audio: np.ndarray):
+    def play_audio(self, audio: np.ndarray, sample_rate: int = None):
         """Play audio through speakers"""
-        sd.play(audio, self.sample_rate)
+        sr = sample_rate or self.sample_rate
+        sd.play(audio, sr)
         sd.wait()
         
-    def save_audio(self, audio: np.ndarray, filename: str):
+    def save_audio(self, audio: np.ndarray, filename: str, sample_rate: int = None):
         """Save audio to WAV file"""
-        # Normalize to 16-bit
-        audio_16bit = (audio * 32767).astype(np.int16)
-        wavfile.write(filename, self.sample_rate, audio_16bit)
+        sr = sample_rate or self.sample_rate
+        audio_16bit = (audio.flatten() * 32767).astype(np.int16)
+        wavfile.write(filename, sr, audio_16bit)
 
 
 class VoiceChangerApp(ctk.CTk):
@@ -185,12 +172,13 @@ class VoiceChangerApp(ctk.CTk):
         
         # Window setup
         self.title("Voice Changer Pro 🎤")
-        self.geometry("450x650")
+        self.geometry("500x700")
         self.resizable(True, True)
         
         # Audio processor
         self.audio = AudioProcessor()
         self.current_recording = None
+        self.converted_sample_rate = 44100
         
         # Build UI
         self.setup_ui()
@@ -213,9 +201,17 @@ class VoiceChangerApp(ctk.CTk):
         )
         title.pack(pady=15)
         
+        subtitle = ctk.CTkLabel(
+            self.main_frame,
+            text="Powered by ElevenLabs AI",
+            font=ctk.CTkFont(size=12),
+            text_color="gray"
+        )
+        subtitle.pack()
+        
         # Status indicator
         self.status_frame = ctk.CTkFrame(self.main_frame)
-        self.status_frame.pack(pady=10, padx=10, fill="x")
+        self.status_frame.pack(pady=15, padx=10, fill="x")
         
         self.status_dot = ctk.CTkLabel(
             self.status_frame,
@@ -232,79 +228,57 @@ class VoiceChangerApp(ctk.CTk):
         )
         self.status_label.pack(side="left")
         
-        # Voice type selector
+        # Voice selector
         voice_frame = ctk.CTkFrame(self.main_frame)
         voice_frame.pack(pady=15, padx=10, fill="x")
         
         voice_label = ctk.CTkLabel(
             voice_frame,
-            text="Voice Type:",
+            text="Select Target Voice:",
             font=ctk.CTkFont(size=14, weight="bold")
         )
         voice_label.pack(pady=10)
         
-        self.voice_var = ctk.StringVar(value="female")
+        self.voice_var = ctk.StringVar(value=list(VOICES.keys())[0])
         
-        voices = [
-            ("👩 Female", "female"),
-            ("👨 Male", "male"),
-            ("🤖 Robot", "robot"),
-            ("🐿️ Chipmunk", "chipmunk"),
-            ("😈 Deep", "deep"),
-            ("🌬️ Whisper", "whisper"),
-        ]
-        
-        voice_grid = ctk.CTkFrame(voice_frame, fg_color="transparent")
-        voice_grid.pack(pady=5)
-        
-        for i, (text, value) in enumerate(voices):
-            rb = ctk.CTkRadioButton(
-                voice_grid,
-                text=text,
-                variable=self.voice_var,
-                value=value,
-                command=self.on_voice_change
-            )
-            rb.grid(row=i//2, column=i%2, padx=20, pady=5, sticky="w")
-        
-        # Pitch slider
-        pitch_frame = ctk.CTkFrame(self.main_frame)
-        pitch_frame.pack(pady=15, padx=10, fill="x")
-        
-        pitch_label = ctk.CTkLabel(
-            pitch_frame,
-            text="Fine Tune Pitch:",
-            font=ctk.CTkFont(size=14, weight="bold")
+        self.voice_dropdown = ctk.CTkComboBox(
+            voice_frame,
+            values=list(VOICES.keys()),
+            variable=self.voice_var,
+            command=self.on_voice_change,
+            width=300,
+            font=ctk.CTkFont(size=14)
         )
-        pitch_label.pack(pady=10)
+        self.voice_dropdown.pack(pady=10)
         
-        self.pitch_slider = ctk.CTkSlider(
-            pitch_frame,
-            from_=-12,
-            to=12,
-            number_of_steps=24,
-            command=self.on_pitch_change
+        # Female voices
+        female_label = ctk.CTkLabel(
+            voice_frame,
+            text="👩 Female: Rachel, Domi, Bella",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
         )
-        self.pitch_slider.pack(pady=5, padx=20, fill="x")
-        self.pitch_slider.set(0)
+        female_label.pack()
         
-        self.pitch_value = ctk.CTkLabel(
-            pitch_frame,
-            text="0 semitones",
-            font=ctk.CTkFont(size=12)
+        # Male voices
+        male_label = ctk.CTkLabel(
+            voice_frame,
+            text="👨 Male: Antoni, Josh, Arnold, Adam, Sam",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
         )
-        self.pitch_value.pack()
+        male_label.pack(pady=(0,10))
         
         # Control buttons
         btn_frame = ctk.CTkFrame(self.main_frame)
-        btn_frame.pack(pady=20, padx=10, fill="x")
+        btn_frame.pack(pady=15, padx=10, fill="x")
         
         # Record button
         self.record_btn = ctk.CTkButton(
             btn_frame,
             text="🎙️ Record",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            height=50,
+            font=ctk.CTkFont(size=18, weight="bold"),
+            height=60,
             fg_color="#e74c3c",
             hover_color="#c0392b",
             command=self.toggle_recording
@@ -314,9 +288,9 @@ class VoiceChangerApp(ctk.CTk):
         # Convert button
         self.convert_btn = ctk.CTkButton(
             btn_frame,
-            text="🔄 Convert Voice",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            height=50,
+            text="🔄 Convert with AI",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            height=60,
             fg_color="#3498db",
             hover_color="#2980b9",
             command=self.convert_voice,
@@ -333,8 +307,8 @@ class VoiceChangerApp(ctk.CTk):
             play_frame,
             text="▶️ Original",
             font=ctk.CTkFont(size=14),
-            height=40,
-            width=120,
+            height=45,
+            width=140,
             fg_color="#7f8c8d",
             hover_color="#636e72",
             command=self.play_original,
@@ -347,8 +321,8 @@ class VoiceChangerApp(ctk.CTk):
             play_frame,
             text="▶️ Converted",
             font=ctk.CTkFont(size=14),
-            height=40,
-            width=120,
+            height=45,
+            width=140,
             fg_color="#27ae60",
             hover_color="#1e8449",
             command=self.play_converted,
@@ -361,7 +335,7 @@ class VoiceChangerApp(ctk.CTk):
             btn_frame,
             text="💾 Save Converted Audio",
             font=ctk.CTkFont(size=14),
-            height=40,
+            height=45,
             fg_color="#9b59b6",
             hover_color="#8e44ad",
             command=self.save_converted,
@@ -369,15 +343,18 @@ class VoiceChangerApp(ctk.CTk):
         )
         self.save_btn.pack(pady=10, padx=20, fill="x")
         
-    def on_voice_change(self):
-        """Handle voice type change"""
-        self.audio.voice_type = self.voice_var.get()
+        # Info
+        info_label = ctk.CTkLabel(
+            self.main_frame,
+            text="💡 Tip: Speak clearly for best results",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        info_label.pack(pady=10)
         
-    def on_pitch_change(self, value):
-        """Handle pitch slider change"""
-        pitch = int(value)
-        self.audio.pitch_shift = pitch
-        self.pitch_value.configure(text=f"{pitch:+d} semitones")
+    def on_voice_change(self, choice):
+        """Handle voice selection change"""
+        self.audio.selected_voice_id = VOICES[choice]
         
     def toggle_recording(self):
         """Start or stop recording"""
@@ -388,14 +365,16 @@ class VoiceChangerApp(ctk.CTk):
             self.status_label.configure(text="Recording saved! Click Convert")
             self.status_dot.configure(text_color="orange")
             
-            if self.current_recording is not None:
+            if self.current_recording is not None and len(self.current_recording) > 0:
+                duration = len(self.current_recording) / self.audio.sample_rate
+                self.status_label.configure(text=f"Recorded {duration:.1f}s - Click Convert")
                 self.convert_btn.configure(state="normal")
                 self.play_orig_btn.configure(state="normal")
         else:
             # Start recording
             self.audio.start_recording()
-            self.record_btn.configure(text="⏹️ Stop", fg_color="#27ae60")
-            self.status_label.configure(text="Recording... Speak now!")
+            self.record_btn.configure(text="⏹️ Stop Recording", fg_color="#27ae60")
+            self.status_label.configure(text="🔴 Recording... Speak now!")
             self.status_dot.configure(text_color="red")
             
             # Reset buttons
@@ -405,32 +384,50 @@ class VoiceChangerApp(ctk.CTk):
             self.save_btn.configure(state="disabled")
             
     def convert_voice(self):
-        """Convert the recorded voice"""
+        """Convert the recorded voice using ElevenLabs"""
         if self.current_recording is None:
             return
             
-        self.status_label.configure(text="Converting...")
+        self.status_label.configure(text="🔄 Converting with AI... Please wait")
         self.status_dot.configure(text_color="yellow")
+        self.convert_btn.configure(state="disabled")
         self.update()
         
         # Run conversion in thread
         def do_convert():
-            self.audio.convert_voice(self.current_recording)
-            self.after(0, self.conversion_done)
+            try:
+                voice_id = self.audio.selected_voice_id
+                converted = self.audio.convert_with_elevenlabs(self.current_recording, voice_id)
+                self.audio.converted_audio = converted
+                
+                if hasattr(self.audio, 'converted_sample_rate'):
+                    self.converted_sample_rate = self.audio.converted_sample_rate
+                    
+                self.after(0, self.conversion_done)
+            except Exception as e:
+                self.after(0, lambda: self.conversion_error(str(e)))
             
         threading.Thread(target=do_convert, daemon=True).start()
         
     def conversion_done(self):
         """Called when conversion is complete"""
-        self.status_label.configure(text="Conversion complete! Click Play")
+        self.status_label.configure(text="✅ Conversion complete! Click Play")
         self.status_dot.configure(text_color="green")
+        self.convert_btn.configure(state="normal")
         self.play_conv_btn.configure(state="normal")
         self.save_btn.configure(state="normal")
+        
+    def conversion_error(self, error_msg):
+        """Called when conversion fails"""
+        self.status_label.configure(text=f"❌ Error: {error_msg[:50]}")
+        self.status_dot.configure(text_color="red")
+        self.convert_btn.configure(state="normal")
+        print(f"Conversion error: {error_msg}")
         
     def play_original(self):
         """Play original recording"""
         if self.current_recording is not None:
-            self.status_label.configure(text="Playing original...")
+            self.status_label.configure(text="▶️ Playing original...")
             threading.Thread(
                 target=lambda: (
                     self.audio.play_audio(self.current_recording),
@@ -442,10 +439,10 @@ class VoiceChangerApp(ctk.CTk):
     def play_converted(self):
         """Play converted audio"""
         if self.audio.converted_audio is not None:
-            self.status_label.configure(text="Playing converted...")
+            self.status_label.configure(text="▶️ Playing converted...")
             threading.Thread(
                 target=lambda: (
-                    self.audio.play_audio(self.audio.converted_audio),
+                    self.audio.play_audio(self.audio.converted_audio, self.converted_sample_rate),
                     self.after(0, lambda: self.status_label.configure(text="Ready"))
                 ),
                 daemon=True
@@ -458,8 +455,8 @@ class VoiceChangerApp(ctk.CTk):
             
         # Create output filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        voice_type = self.voice_var.get()
-        filename = f"converted_{voice_type}_{timestamp}.wav"
+        voice_name = self.voice_var.get().split()[0]
+        filename = f"converted_{voice_name}_{timestamp}.wav"
         
         # Save to user's documents or current directory
         docs_path = os.path.expanduser("~/Documents")
@@ -468,8 +465,8 @@ class VoiceChangerApp(ctk.CTk):
         else:
             filepath = filename
             
-        self.audio.save_audio(self.audio.converted_audio, filepath)
-        self.status_label.configure(text=f"Saved: {filename}")
+        self.audio.save_audio(self.audio.converted_audio, filepath, self.converted_sample_rate)
+        self.status_label.configure(text=f"💾 Saved: {filename}")
             
     def on_close(self):
         """Handle window close"""
