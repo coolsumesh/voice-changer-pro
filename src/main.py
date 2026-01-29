@@ -15,6 +15,16 @@ import tempfile
 from datetime import datetime
 from scipy.io import wavfile
 
+# Setup FFmpeg path for pydub (use local ffmpeg if available)
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FFMPEG_PATH = os.path.join(APP_DIR, "ffmpeg.exe")
+FFPROBE_PATH = os.path.join(APP_DIR, "ffprobe.exe")
+
+if os.path.exists(FFMPEG_PATH):
+    from pydub import AudioSegment
+    AudioSegment.converter = FFMPEG_PATH
+    AudioSegment.ffprobe = FFPROBE_PATH
+
 # Configure UI theme
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -102,12 +112,11 @@ class AudioProcessor:
         # Convert audio to WAV bytes
         wav_bytes = self.audio_to_wav_bytes(audio)
         
-        # ElevenLabs Speech-to-Speech endpoint with PCM output (no FFmpeg needed!)
+        # ElevenLabs Speech-to-Speech endpoint
         url = f"https://api.elevenlabs.io/v1/speech-to-speech/{voice_id}"
         
         headers = {
             "xi-api-key": ELEVENLABS_API_KEY,
-            "Accept": "audio/mpeg",  # Request format
         }
         
         # Send as multipart form data
@@ -117,24 +126,27 @@ class AudioProcessor:
         
         data = {
             "model_id": self.selected_model,
-            "voice_settings": '{"stability": 0.5, "similarity_boost": 0.75}',
-            "output_format": "pcm_44100"  # PCM format - no FFmpeg needed!
+            "voice_settings": '{"stability": 0.5, "similarity_boost": 0.75}'
         }
         
         response = requests.post(url, headers=headers, files=files, data=data)
         
         if response.status_code == 200:
-            # PCM format is raw 16-bit signed integers
+            # Response is MP3 - use pydub to convert
+            from pydub import AudioSegment
+            
             audio_bytes = response.content
             
-            # Convert PCM bytes to numpy array
-            audio_data = np.frombuffer(audio_bytes, dtype=np.int16)
+            # Load MP3 from bytes
+            audio_seg = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
             
-            # Convert to float32 [-1, 1]
-            audio_float = audio_data.astype(np.float32) / 32767
+            # Convert to numpy
+            samples = np.array(audio_seg.get_array_of_samples())
+            if audio_seg.channels == 2:
+                samples = samples.reshape((-1, 2)).mean(axis=1)
             
-            self.converted_sample_rate = 44100
-            return audio_float
+            self.converted_sample_rate = audio_seg.frame_rate
+            return samples.astype(np.float32) / 32767
         else:
             try:
                 error_data = response.json()
